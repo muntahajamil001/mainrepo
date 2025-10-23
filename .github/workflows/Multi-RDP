@@ -162,44 +162,54 @@ jobs:
           
           $browserScript = @'
 @echo off
-timeout /t 5 /nobreak >nul
+timeout /t 8 /nobreak >nul
 
 REM Launch Chrome with your link
 if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
     start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" "https://pplx.ai/khizar-nisar"
+    echo Chrome launched
 )
 
-REM Wait a moment
-timeout /t 2 /nobreak >nul
+REM Wait before launching Comet
+timeout /t 3 /nobreak >nul
 
 REM Launch Comet Browser if installed
 if exist "%LOCALAPPDATA%\Programs\Comet\Comet.exe" (
     start "" "%LOCALAPPDATA%\Programs\Comet\Comet.exe"
+    echo Comet Browser launched
 ) else if exist "C:\Program Files\Comet\Comet.exe" (
     start "" "C:\Program Files\Comet\Comet.exe"
+    echo Comet Browser launched
+) else if exist "%APPDATA%\Comet\Comet.exe" (
+    start "" "%APPDATA%\Comet\Comet.exe"
+    echo Comet Browser launched
 )
 '@
           
           $browserScript | Out-File -FilePath $scriptPath -Encoding ASCII -Force
-          Write-Host "Browser auto-launch configured"
+          Write-Host "Browser auto-launch configured (Chrome + Comet)"
           
-          # Launch browsers now for current session
-          Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList "https://pplx.ai/khizar-nisar"
+          # Launch Chrome now for current session
+          Start-Sleep -Seconds 2
+          Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList "https://pplx.ai/khizar-nisar" -ErrorAction SilentlyContinue
+          Write-Host "Chrome launched with pplx.ai/khizar-nisar"
           
-          # Try to launch Comet if installed
+          # Try to launch Comet now
           $cometPaths = @(
               "$env:LOCALAPPDATA\Programs\Comet\Comet.exe",
-              "C:\Program Files\Comet\Comet.exe"
+              "C:\Program Files\Comet\Comet.exe",
+              "$env:APPDATA\Comet\Comet.exe"
           )
           
           foreach ($path in $cometPaths) {
               if (Test-Path $path) {
                   Start-Sleep -Seconds 2
-                  Start-Process $path
-                  Write-Host "Comet Browser launched"
+                  Start-Process $path -ErrorAction SilentlyContinue
+                  Write-Host "Comet Browser launched from: $path"
                   break
               }
           }
+          Write-Host "Both browsers configured for auto-launch"
       
       - name: Verify RDP Connection
         run: |
@@ -258,7 +268,7 @@ if exist "%LOCALAPPDATA%\Programs\Comet\Comet.exe" (
           Write-Host "  Username : RDP"
           Write-Host "  Password : Khizar@123"
           Write-Host "  Chrome: pplx.ai/khizar-nisar (auto-opens)"
-          Write-Host "  Comet Browser: Installed & auto-launches"
+          Write-Host "  Comet Browser: Auto-launches on login"
           Write-Host "═══════════════════════════════════════════════"
           Write-Host ""
           
@@ -304,7 +314,7 @@ if exist "%LOCALAPPDATA%\Programs\Comet\Comet.exe" (
           echo "  3. Enter the IP address from above" >> ALL_RDP_CREDENTIALS.txt
           echo "  4. Use Username: RDP, Password: Khizar@123" >> ALL_RDP_CREDENTIALS.txt
           echo "  5. Chrome opens to pplx.ai/khizar-nisar automatically" >> ALL_RDP_CREDENTIALS.txt
-          echo "  6. Comet Browser also auto-launches" >> ALL_RDP_CREDENTIALS.txt
+          echo "  6. Comet Browser also auto-launches on login" >> ALL_RDP_CREDENTIALS.txt
           echo "═══════════════════════════════════════════════════════════" >> ALL_RDP_CREDENTIALS.txt
           
           cat ALL_RDP_CREDENTIALS.txt
