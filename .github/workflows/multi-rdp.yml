@@ -1,0 +1,233 @@
+name: Multi-RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_count:
+        description: 'Number of RDP instances to create'
+        required: true
+        default: '5'
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    strategy:
+      matrix:
+        instance: [1, 2, 3, 4, 5]
+      fail-fast: false
+      max-parallel: 5
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+          Write-Host "RDP configured successfully"
+
+      - name: Create RDP User
+        run: |
+          $username = "RDP"
+          $password = "Khizar@123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name $username -Force
+          }
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          Write-Host "User created successfully"
+
+      - name: Install Chrome
+        run: |
+          Write-Host "Downloading Chrome..."
+          $chromeUrl = "https://dl.google.com/chrome/install/standalonesetup64.exe"
+          $installerPath = "$env:TEMP\chrome_installer.exe"
+          Invoke-WebRequest -Uri $chromeUrl -OutFile $installerPath
+          Start-Process -FilePath $installerPath -Args "/silent /install" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Chrome installed"
+
+      - name: Install Comet Browser
+        run: |
+          Write-Host "Attempting to install Comet Browser..."
+          try {
+              $cometUrls = @(
+                  "https://updates.comet.co/download/windows/x64",
+                  "https://download.comet.co/windows/Comet-Setup.exe"
+              )
+              $installerPath = "$env:TEMP\comet_installer.exe"
+              $downloaded = $false
+              foreach ($url in $cometUrls) {
+                  try {
+                      Invoke-WebRequest -Uri $url -OutFile $installerPath -TimeoutSec 30 -ErrorAction Stop
+                      $downloaded = $true
+                      break
+                  } catch {
+                      continue
+                  }
+              }
+              if ($downloaded -and (Test-Path $installerPath)) {
+                  Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait -NoNewWindow
+                  Start-Sleep -Seconds 3
+                  Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+                  Write-Host "Comet Browser installed"
+              }
+          } catch {
+              Write-Host "Comet installation skipped"
+          }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Tailscale installed"
+
+      - name: Connect to Tailscale
+        run: |
+          $hostname = "rdp-instance-${{ matrix.instance }}-run-${{ github.run_number }}"
+          Write-Host "Connecting to Tailscale: $hostname"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 15) {
+              Start-Sleep -Seconds 3
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Failed to get Tailscale IP"
+              exit 1
+          }
+          Write-Host "Tailscale IP: $tsIP"
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          echo "HOSTNAME=$hostname" >> $env:GITHUB_ENV
+
+      - name: Setup Auto-Launch Browsers
+        run: |
+          $startupFolder = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
+          $scriptPath = "$startupFolder\OpenBrowsers.bat"
+          $browserScript = @'
+@echo off
+timeout /t 8 /nobreak >nul
+if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
+    start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" "https://pplx.ai/khizar-nisar"
+)
+timeout /t 3 /nobreak >nul
+if exist "%LOCALAPPDATA%\Programs\Comet\Comet.exe" (
+    start "" "%LOCALAPPDATA%\Programs\Comet\Comet.exe"
+) else if exist "C:\Program Files\Comet\Comet.exe" (
+    start "" "C:\Program Files\Comet\Comet.exe"
+)
+'@
+          $browserScript | Out-File -FilePath $scriptPath -Encoding ASCII -Force
+          Start-Sleep -Seconds 2
+          Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList "https://pplx.ai/khizar-nisar" -ErrorAction SilentlyContinue
+          Write-Host "Browsers configured"
+
+      - name: Verify RDP Connection
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if ($testResult.TcpTestSucceeded) {
+              Write-Host "RDP port accessible"
+          }
+
+      - name: Export Credentials
+        run: |
+          $credFile = "C:\RDP_Credentials.txt"
+          $content = @"
+═══════════════════════════════════════════════════════════
+  RDP INSTANCE ${{ matrix.instance }} CREDENTIALS
+═══════════════════════════════════════════════════════════
+  Hostname     : $env:HOSTNAME
+  IP Address   : $env:TAILSCALE_IP
+  Username     : RDP
+  Password     : Khizar@123
+  Port         : 3389
+  
+  Connect: mstsc /v:$env:TAILSCALE_IP
+  Created: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+═══════════════════════════════════════════════════════════
+
+"@
+          $content | Out-File -FilePath $credFile -Encoding UTF8 -Force
+
+      - name: Upload Credentials
+        uses: actions/upload-artifact@v3
+        with:
+          name: rdp-credentials-instance-${{ matrix.instance }}
+          path: C:\RDP_Credentials.txt
+          retention-days: 1
+
+      - name: Keep Instance Running
+        run: |
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  RDP INSTANCE ${{ matrix.instance }} - READY"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host "  Hostname : $env:HOSTNAME"
+          Write-Host "  IP       : $env:TAILSCALE_IP"
+          Write-Host "  Username : RDP"
+          Write-Host "  Password : Khizar@123"
+          Write-Host "  Chrome   : Auto-opens to pplx.ai/khizar-nisar"
+          Write-Host "  Comet    : Auto-launches"
+          Write-Host "═══════════════════════════════════════════════"
+          Write-Host ""
+          $counter = 0
+          while ($true) {
+              $counter++
+              $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              Write-Host "[$timestamp] Instance ${{ matrix.instance }} Active (#$counter)"
+              Start-Sleep -Seconds 300
+          }
+
+  consolidate-credentials:
+    needs: secure-rdp
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Download All Credentials
+        uses: actions/download-artifact@v3
+        with:
+          path: credentials
+      
+      - name: Consolidate Credentials
+        run: |
+          echo "═══════════════════════════════════════════════════════════" > ALL_RDP_CREDENTIALS.txt
+          echo "  ALL RDP INSTANCES - CONSOLIDATED CREDENTIALS" >> ALL_RDP_CREDENTIALS.txt
+          echo "  Run Number: ${{ github.run_number }}" >> ALL_RDP_CREDENTIALS.txt
+          echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> ALL_RDP_CREDENTIALS.txt
+          echo "═══════════════════════════════════════════════════════════" >> ALL_RDP_CREDENTIALS.txt
+          echo "" >> ALL_RDP_CREDENTIALS.txt
+          for dir in credentials/*/; do
+            if [ -f "${dir}RDP_Credentials.txt" ]; then
+              cat "${dir}RDP_Credentials.txt" >> ALL_RDP_CREDENTIALS.txt
+            fi
+          done
+          echo "" >> ALL_RDP_CREDENTIALS.txt
+          echo "═══════════════════════════════════════════════════════════" >> ALL_RDP_CREDENTIALS.txt
+          echo "  QUICK CONNECT GUIDE:" >> ALL_RDP_CREDENTIALS.txt
+          echo "  1. Connect to Tailscale on your PC" >> ALL_RDP_CREDENTIALS.txt
+          echo "  2. Open Remote Desktop (mstsc)" >> ALL_RDP_CREDENTIALS.txt
+          echo "  3. Enter IP address from above" >> ALL_RDP_CREDENTIALS.txt
+          echo "  4. Username: RDP | Password: Khizar@123" >> ALL_RDP_CREDENTIALS.txt
+          echo "  5. Chrome auto-opens to pplx.ai/khizar-nisar" >> ALL_RDP_CREDENTIALS.txt
+          echo "  6. Comet Browser auto-launches" >> ALL_RDP_CREDENTIALS.txt
+          echo "═══════════════════════════════════════════════════════════" >> ALL_RDP_CREDENTIALS.txt
+          cat ALL_RDP_CREDENTIALS.txt
+      
+      - name: Upload Consolidated Credentials
+        uses: actions/upload-artifact@v3
+        with:
+          name: ALL-RDP-CREDENTIALS
+          path: ALL_RDP_CREDENTIALS.txt
+          retention-days: 1
